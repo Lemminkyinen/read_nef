@@ -1,0 +1,12 @@
+[package]
+name = "read_nef"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+image="0.24.2"
+byteorder="1"
+flate2="1"
+rawloader="0.37"
