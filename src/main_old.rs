@@ -70,39 +70,43 @@ fn main() {
 
     let makernote = tag8769_ifd.get_entry_by_name(TagName::MakerNote);
     let makernote_offset = bytes_to_num(&makernote.unwrap().data_or_offset);
+    println!("Makernote offset: {}", makernote_offset);
     let maker_note_header = &buffer[makernote_offset..makernote_offset + 10];
     // print_list_dec_and_hex(&makernote.unwrap().raw_data);
-    print_list_dec_and_hex(&maker_note_header);
+    print_list_dec_and_hex("Makernote header: ", &maker_note_header);
     // println!("{:?}", makernote.unwrap().raw_data);
-    let nikon_hex = [0x4E, 0x69, 0x6B, 0x6F, 0x6E];
+    // let nikon_hex = [0x4E, 0x69, 0x6B, 0x6F, 0x6E];
 
     let makernote_tiff_header = &buffer[makernote_offset + 10..makernote_offset + 10 + 8];
-    print_list_dec_and_hex(makernote_tiff_header);
+    print_list_dec_and_hex("Makernote tiff header: ", makernote_tiff_header);
 
     let makernote_first_entry_num_of_entries =
         &buffer[makernote_offset + 10 + 8..makernote_offset + 10 + 8 + 2];
-    print_list_dec_and_hex(makernote_first_entry_num_of_entries);
-
+    print_list_dec_and_hex(
+        "Makernote num of entries: ",
+        makernote_first_entry_num_of_entries,
+    );
+    println!("Buffer length: {}", buffer_length);
     let makernote_ifd = read_ifd(&buffer, &(&(makernote_offset + 10 + 8)));
-    makernote_ifd.print_info(true);
+    // makernote_ifd.print_info(true);
 
     let entry_0x8c = makernote_ifd.get_entry_by_hex(0x8c).unwrap();
     let entry_0x96 = makernote_ifd.get_entry_by_hex(0x96).unwrap();
 
-    print_list_dec_and_hex(&entry_0x8c.raw_data);
-    print_list_dec_and_hex(&entry_0x96.raw_data);
+    // print_list_dec_and_hex(&entry_0x8c.raw_data);
+    // print_list_dec_and_hex(&entry_0x96.raw_data);
 
     let offset_0x8c = bytes_to_num(&entry_0x8c.data_or_offset);
     let num_of_comp_0x8c = &entry_0x8c.num_of_components;
     let data_0x8c = &buffer[makernote_offset + 10 + offset_0x8c
         ..makernote_offset + 10 + offset_0x8c + num_of_comp_0x8c];
-    println!("{:?}", data_0x8c);
+    // println!("{:?}", data_0x8c);
 
     let offset_0x96 = bytes_to_num(&entry_0x96.data_or_offset);
     let num_of_comp_0x96 = &entry_0x96.num_of_components;
     let data_0x96 = &buffer[makernote_offset + 10 + offset_0x96
         ..makernote_offset + 10 + offset_0x96 + num_of_comp_0x96];
-    println!("{:?}", data_0x96);
+    // println!("{:?}", data_0x96);
     // The quantization tables are at 0x8c and 0x96 tag from the MakerNote
 
     let image_length = bytes_to_num(
@@ -127,7 +131,7 @@ fn main() {
     ) as f32;
 
     let strips_per_image = ((image_length + rows_per_strip - 1_f32) / rows_per_strip).floor();
-    println!("Strips per image: {}", strips_per_image);
+    // println!("Strips per image: {}", strips_per_image);
 
     let strip_byte_count = bytes_to_num(
         &eka_ifd
@@ -135,7 +139,7 @@ fn main() {
             .unwrap()
             .data_or_offset,
     );
-    println!("Strip byte count: {:?}", strip_byte_count);
+    // println!("Strip byte count: {:?}", strip_byte_count);
 
     let strip_offsets = bytes_to_num(
         &eka_ifd
@@ -143,10 +147,10 @@ fn main() {
             .unwrap()
             .data_or_offset,
     );
-    println!("Strip offsets: {:?}", strip_offsets);
+    // println!("Strip offsets: {:?}", strip_offsets);
 
     let n = samples_per_pixel * strips_per_image;
-    println!("N: {}", n);
+    // println!("N: {}", n);
 
     // let thumbnail_data = &buffer[strip_offsets..strip_offsets + strip_byte_count];
     let mut file1 = File::create("thumbnail1.jpg").unwrap();
@@ -661,10 +665,10 @@ fn bytes_to_num(bytes: &[u8]) -> usize {
 //     println!("Offset: {}.", ifd.offset);
 // }
 
-fn print_list_dec_and_hex(list: &[u8]) {
+fn print_list_dec_and_hex(string: &str, list: &[u8]) {
     let list_len = list.len();
-    println!("{:?}", list);
-    print!("[");
+    println!("{}{:?}", string, list);
+    print!("{}[", string);
     for (i, elem) in list.iter().enumerate() {
         print!("{:#02X}", elem);
         if i + 1 < list_len {

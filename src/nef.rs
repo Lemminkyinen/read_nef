@@ -85,7 +85,7 @@ impl NefFile {
     }
 
     fn parse_ifds(&self) -> Result<Vec<Ifd>, Error> {
-        let parsed_ifds = Ifd::parse_ifd(self.buffer.as_slice());
+        let parsed_ifds = Ifd::parse_ifd(self.buffer.as_slice(), 0);
         Ok(parsed_ifds)
     }
     // fn parse_metadata(&mut self) -> Result<(), Error> {
