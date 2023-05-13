@@ -1,4 +1,5 @@
 use std::path::Path;
+mod huffman;
 mod ifd;
 mod nef;
 mod utils;
@@ -16,4 +17,8 @@ fn main() {
         }
         Err(e) => eprintln!("Error: {:?}", e),
     }
+
+    let testi_data = "7777777555553332211".as_bytes();
+    let huffman_tree = huffman::create_tree(testi_data);
+    println!("Huffman tree: {:?}", huffman_tree);
 }
