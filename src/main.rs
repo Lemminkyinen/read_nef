@@ -19,6 +19,9 @@ fn main() {
     }
 
     let testi_data = "7777777555553332211".as_bytes();
-    let huffman_tree = huffman::create_tree(testi_data);
-    println!("Huffman tree: {:?}", huffman_tree);
+    let encoded_data = huffman::encode(testi_data);
+    println!(
+        "huffman table: {:?} \nencrypted data: {:?}",
+        encoded_data.0, encoded_data.1
+    );
 }

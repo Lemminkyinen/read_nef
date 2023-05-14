@@ -17,6 +17,11 @@ impl Node {
             right,
         }
     }
+
+    fn is_leaf(&self) -> bool {
+        self.left.is_none() && self.right.is_none()
+    }
+
     fn box_and_wrap(self) -> Option<Box<Node>> {
         let boxed_value = Box::new(self);
         Some(boxed_value)
@@ -68,10 +73,49 @@ fn create_parent(left_node: Node, right_node: Node) -> Node {
     Node::new(None, parent_node_freq, boxed_left_node, boxed_right_node)
 }
 
-pub fn create_tree(data: &[u8]) -> Node {
+fn create_tree(data: &[u8]) -> Node {
     let data_vec = data.to_vec();
     let huffman_frequencies = build_frequencies(data_vec);
     let priority_queue = build_priority_queue(huffman_frequencies);
     let nodes = build_nodes(priority_queue.clone());
     build_tree(nodes).pop().unwrap()
+}
+
+fn traverse_tree(
+    node: &Node,
+    lookup_table: &mut HashMap<u8, Vec<bool>>,
+    bit_sequence: &mut Vec<bool>,
+) {
+    match node.byte {
+        Some(byte) => {
+            lookup_table.insert(byte, bit_sequence.clone());
+        }
+        None => {
+            bit_sequence.push(false);
+            traverse_tree(node.left.as_ref().unwrap(), lookup_table, bit_sequence);
+            bit_sequence.pop();
+
+            bit_sequence.push(true);
+            traverse_tree(node.right.as_ref().unwrap(), lookup_table, bit_sequence);
+            bit_sequence.pop();
+        }
+    }
+}
+
+fn create_lookup_table(tree: Node) -> HashMap<u8, Vec<bool>> {
+    let mut lookup_table: HashMap<u8, Vec<bool>> = HashMap::new();
+    let mut bit_sequence = Vec::new();
+    traverse_tree(&tree, &mut lookup_table, &mut bit_sequence);
+    return lookup_table;
+}
+
+pub fn encode(data: &[u8]) -> (HashMap<u8, Vec<bool>>, Vec<bool>) {
+    let huffman_tree = create_tree(data);
+    let huffman_table = create_lookup_table(huffman_tree);
+    let encoded_data: Vec<bool> = data
+        .iter()
+        .flat_map(|&byte| huffman_table.get(&byte).unwrap())
+        .cloned()
+        .collect();
+    (huffman_table, encoded_data)
 }
