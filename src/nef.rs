@@ -88,6 +88,15 @@ impl NefFile {
         let parsed_ifds = Ifd::parse_ifd(self.buffer.as_slice(), 0);
         Ok(parsed_ifds)
     }
+
+    pub fn get_n_ifd(&self, n: usize) -> Option<&Ifd> {
+        self.ifds.get(n)
+    }
+
+    pub fn get_buffer(&self) -> &[u8] {
+        &self.buffer
+    }
+
     // fn parse_metadata(&mut self) -> Result<(), Error> {
     //     // Extract metadata from the file.
     // }

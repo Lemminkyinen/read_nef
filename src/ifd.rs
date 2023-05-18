@@ -108,7 +108,7 @@ pub enum IfdEntryType {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum TagParam {
+pub enum TagParam {
     IfdEntry(IfdEntryTag),
     U8(u8),
 }
@@ -192,7 +192,7 @@ impl From<usize> for IfdEntryTag {
 }
 
 impl IfdEntryTag {
-    pub fn u16_value(&self) -> u16 {
+    pub fn usize_value(&self) -> usize {
         match self {
             IfdEntryTag::NewSubfileType => 0xFE,
             IfdEntryTag::ImageWidth => 0x100,
@@ -263,7 +263,7 @@ impl IfdEntryTag {
             IfdEntryTag::NikonCaptureColorHue => 0xA409,
             IfdEntryTag::NikonCaptureSaturation => 0xA40A,
             IfdEntryTag::NikonCaptureNoiseReduction => 0xA40C,
-            IfdEntryTag::Unknown(value) => *value as u16,
+            IfdEntryTag::Unknown(value) => *value as usize,
         }
     }
 }
@@ -402,7 +402,7 @@ impl Ifd {
         let mut ifd_offsets: Vec<usize> = Vec::new();
         match tag {
             TagParam::IfdEntry(ifd_tag) => {
-                if let Some(offset_to_ifd) = ifd.get_entry(ifd_tag) {
+                if let Some(offset_to_ifd) = ifd.get_entry(TagParam::IfdEntry(ifd_tag)) {
                     println!("Parsing ifd from tag: {:?}", ifd_tag);
                     if offset_to_ifd.offset && ifd_tag != IfdEntryTag::MakerNote {
                         println!("IFD {:?} offset true", ifd_tag);
@@ -428,43 +428,24 @@ impl Ifd {
         }
     }
 
-    fn get_entry(&self, ifd_name: IfdEntryTag) -> Option<&IfdEntry> {
-        self.entries.iter().find(|entry| entry.tag == ifd_name)
+    pub fn get_entry(&self, ifd_name: TagParam) -> Option<&IfdEntry> {
+        match ifd_name {
+            TagParam::IfdEntry(ifd_entry_name) => self
+                .entries
+                .iter()
+                .find(|entry| entry.tag == ifd_entry_name),
+            TagParam::U8(value) => self
+                .entries
+                .iter()
+                .find(|entry| entry.tag.usize_value() == value.into()),
+        }
     }
 
     pub fn print_info(&self) {
-        fn print_ifd_entry(entry: &IfdEntry) {
-            print!(
-                "Tag ID: {:#02X}, {:?}. ",
-                entry.tag.u16_value(),
-                entry.tag.u16_value()
-            );
-            print!("Tag name: {:?}. ", entry.tag);
-            print!(
-                "Data format: {:?}, {} byte(s). ",
-                entry.data_type,
-                entry.data_type.bytes_per_component()
-            );
-            print!("Data length: {:?}. ", entry.data_length);
-            print!(
-                "Data value or offset to data value: {:#02X}, {:?}, {:?}. ",
-                bytes_to_num(&entry.data_or_offset),
-                bytes_to_num(&entry.data_or_offset),
-                entry.data_or_offset
-            );
-            println!("Offset: {}.", entry.offset);
-        }
         println!("-------------------------");
-        // println!("Start of IFD: {:?}", &self.start);
-        // println!("End of IFD: {:?}", &self.end);
         for ifd_entry in &self.entries {
-            print_ifd_entry(ifd_entry);
+            ifd_entry.print_info();
         }
-        // if self.offset_to_next_ifd == 0 {
-        //     println!("No linked IFD! Value {:?}", &self.offset_to_next_ifd)
-        // } else {
-        //     println!("Offset to next IFD: {:?}", &self.offset_to_next_ifd)
-        // }
         println!("-------------------------");
     }
 }
@@ -536,5 +517,27 @@ impl IfdEntry {
         } else {
             &[]
         }
+    }
+
+    pub fn print_info(&self) {
+        print!(
+            "Tag ID: {:#02X}, {:?}. ",
+            self.tag.usize_value(),
+            self.tag.usize_value()
+        );
+        print!("Tag name: {:?}. ", self.tag);
+        print!(
+            "Data format: {:?}, {} byte(s). ",
+            self.data_type,
+            self.data_type.bytes_per_component()
+        );
+        print!("Data length: {:?}. ", self.data_length);
+        print!(
+            "Data value or offset to data value: {:#02X}, {:?}, {:?}. ",
+            bytes_to_num(&self.data_or_offset),
+            bytes_to_num(&self.data_or_offset),
+            self.data_or_offset
+        );
+        println!("Offset: {}.", self.offset);
     }
 }
