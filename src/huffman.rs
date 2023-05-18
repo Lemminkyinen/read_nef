@@ -18,10 +18,6 @@ impl Node {
         }
     }
 
-    fn is_leaf(&self) -> bool {
-        self.left.is_none() && self.right.is_none()
-    }
-
     fn box_and_wrap(self) -> Option<Box<Node>> {
         let boxed_value = Box::new(self);
         Some(boxed_value)
@@ -109,6 +105,18 @@ fn create_lookup_table(tree: Node) -> HashMap<u8, Vec<bool>> {
     return lookup_table;
 }
 
+fn swap_keys_values<K, V>(map: &HashMap<K, V>) -> HashMap<V, K>
+where
+    K: std::hash::Hash + Eq + Clone,
+    V: std::hash::Hash + Eq + Clone,
+{
+    let mut swapped_map = HashMap::new();
+    for (key, value) in map {
+        swapped_map.insert(value.clone(), key.clone());
+    }
+    swapped_map
+}
+
 pub fn encode(data: &[u8]) -> (HashMap<u8, Vec<bool>>, Vec<bool>) {
     let huffman_tree = create_tree(data);
     let huffman_table = create_lookup_table(huffman_tree);
@@ -118,4 +126,18 @@ pub fn encode(data: &[u8]) -> (HashMap<u8, Vec<bool>>, Vec<bool>) {
         .cloned()
         .collect();
     (huffman_table, encoded_data)
+}
+
+pub fn decode(huffman_table: HashMap<u8, Vec<bool>>, encoded_data: &[bool]) -> Vec<u8> {
+    let mut decoded_data: Vec<u8> = Vec::new();
+    let mut code = Vec::new();
+    let swapped_table = swap_keys_values(&huffman_table);
+    for bit in encoded_data {
+        code.push(*bit);
+        if let Some(byte) = swapped_table.get(&code) {
+            decoded_data.push(byte.clone());
+            code.clear();
+        }
+    }
+    decoded_data
 }
