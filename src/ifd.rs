@@ -1,12 +1,48 @@
+use byteorder::{ByteOrder, LittleEndian};
+
 use crate::utils::bytes_to_num;
 
+macro_rules! alloc_image_plain {
+    ($width:expr, $height:expr, $dummy: expr) => {{
+        if $width * $height > 500000000 || $width > 50000 || $height > 50000 {
+            panic!(
+                "rawloader: surely there's no such thing as a >500MP or >50000 px wide/tall image!"
+            );
+        }
+        if $dummy {
+            vec![0]
+        } else {
+            vec![0; $width * $height]
+        }
+    }};
+}
+
+macro_rules! alloc_image {
+    ($width:expr, $height:expr, $dummy: expr) => {{
+        let out = alloc_image_plain!($width, $height, $dummy);
+        if $dummy {
+            return out;
+        }
+        out
+    }};
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IfdType {
+    NikonMakerNote,
+    Exif,
+    Other,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ifd {
+    pub ifd_type: IfdType,
+    pub ifd_buffer_start_point: usize,
     pub entries: Vec<IfdEntry>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct IfdEntry {
+    pub ifd_buffer_start_point: usize,
     pub tag: IfdEntryTag,
     pub data_type: IfdEntryType,
     pub data_or_offset: [u8; 4],
@@ -309,9 +345,12 @@ impl IfdEntryType {
 
 impl Ifd {
     pub fn parse_ifd(buffer: &[u8], offset: usize) -> Vec<Self> {
+        // https://www.ozhiker.com/electronics/pjmt/jpeg_info/nikon_mn.html
+
         let mut ifds = Vec::new();
         let mut internal_offset;
         let mut nikon_mapping = false;
+        let mut ifd_offset = None;
         let ifd_buffer = &buffer[offset..];
 
         let nikon_patterns = vec![
@@ -339,8 +378,16 @@ impl Ifd {
 
         let ifd_entries = Vec::with_capacity(num_entries);
         let mut ifd = Ifd {
+            ifd_type: IfdType::Other,
+            ifd_buffer_start_point: offset,
             entries: ifd_entries,
         };
+
+        if nikon_mapping {
+            ifd_offset = Some(offset + 10);
+            ifd.ifd_buffer_start_point = ifd_offset.unwrap();
+            ifd.ifd_type = IfdType::NikonMakerNote;
+        }
 
         for _ in 0..num_entries {
             let ifd_entry;
@@ -348,10 +395,9 @@ impl Ifd {
                 .try_into()
                 .unwrap();
             if !nikon_mapping {
-                ifd_entry = IfdEntry::parse_entry(entry_data);
+                ifd_entry = IfdEntry::parse_entry(entry_data, ifd_offset);
             } else {
-                // ifd_entry = IfdEntryNikon::parse_entry(entry_data);
-                ifd_entry = IfdEntry::parse_entry(entry_data);
+                ifd_entry = IfdEntry::parse_entry(entry_data, ifd_offset);
             }
 
             ifd.entries.push(ifd_entry);
@@ -448,10 +494,53 @@ impl Ifd {
         }
         println!("-------------------------");
     }
+
+    pub fn get_image_data(&self, ifd_buffer: &[u8]) -> Option<Vec<u16>> {
+        let img_strip_offsets = self.get_entry(TagParam::IfdEntry(IfdEntryTag::StripOffsets));
+        let img_rows_per_strip = self.get_entry(TagParam::IfdEntry(IfdEntryTag::RowsPerStrip));
+        let img_strip_byte_count = self.get_entry(TagParam::IfdEntry(IfdEntryTag::StripByteCounts));
+        let img_length = self.get_entry(TagParam::IfdEntry(IfdEntryTag::ImageLength));
+        let img_sample_per_pixel = self.get_entry(TagParam::IfdEntry(IfdEntryTag::SamplesPerPixel));
+        let img_width = self.get_entry(TagParam::IfdEntry(IfdEntryTag::ImageWidth));
+        let img_height = self.get_entry(TagParam::IfdEntry(IfdEntryTag::ImageLength));
+
+        if img_strip_offsets.is_none()
+            || img_sample_per_pixel.is_none()
+            || img_rows_per_strip.is_none()
+            || img_strip_byte_count.is_none()
+            || img_length.is_none()
+            || img_width.is_none()
+            || img_height.is_none()
+        {
+            return None;
+        }
+
+        let img_strip_offsets = bytes_to_num(&img_strip_offsets.unwrap().data_or_offset);
+        let img_rows_per_strip = bytes_to_num(&img_rows_per_strip.unwrap().data_or_offset);
+        let img_strip_byte_count = bytes_to_num(&img_strip_byte_count.unwrap().data_or_offset);
+        let img_length = bytes_to_num(&img_length.unwrap().data_or_offset);
+        let img_sample_per_pixel = bytes_to_num(&img_sample_per_pixel.unwrap().data_or_offset);
+        let img_width = bytes_to_num(&img_width.unwrap().data_or_offset);
+        let img_height = bytes_to_num(&img_height.unwrap().data_or_offset);
+
+        // let img_strip_offsets = img_strip_offsets.get_offset_data(&ifd_buffer);
+        let strips_per_image =
+            f64::floor(((img_length + img_rows_per_strip - 1) / img_rows_per_strip) as f64)
+                as usize;
+
+        let strip_start = img_strip_offsets;
+        let strip_end = img_strip_offsets + img_strip_byte_count;
+        let strip_data = &ifd_buffer[strip_start..strip_end as usize];
+
+        let image = decode_14le_unpacked(strip_data, img_width, img_height, false);
+        // todo!("Decode image data");
+
+        Some(image)
+    }
 }
 
 impl IfdEntry {
-    pub fn parse_entry(data: &[u8; 12]) -> Self {
+    pub fn parse_entry(data: &[u8; 12], ifd_buffer_start_point: Option<usize>) -> Self {
         let raw_entry = *data;
         let tag = IfdEntryTag::from(bytes_to_num(&data[0..2]));
         let data_type = IfdEntryType::from(bytes_to_num(&data[2..4]));
@@ -459,7 +548,9 @@ impl IfdEntry {
         let data_length = num_values * data_type.bytes_per_component() as usize;
         let offset = data_length > 4;
         let data_or_offset = [data[8], data[9], data[10], data[11]];
+        let ifd_buffer_start_point = ifd_buffer_start_point.unwrap_or(0);
         Self {
+            ifd_buffer_start_point,
             tag,
             data_type,
             data_or_offset,
@@ -511,8 +602,9 @@ impl IfdEntry {
     }
 
     pub fn get_offset_data<'a>(&self, buffer: &'a [u8]) -> &'a [u8] {
-        if self.offset {
-            let offset = bytes_to_num(&self.data_or_offset) as usize;
+        if self.offset || self.tag == IfdEntryTag::StripOffsets {
+            let mut offset = bytes_to_num(&self.data_or_offset) as usize;
+            offset = offset + self.ifd_buffer_start_point;
             &buffer[offset..offset + self.data_length]
         } else {
             &[]
@@ -540,4 +632,178 @@ impl IfdEntry {
         );
         println!("Offset: {}.", self.offset);
     }
+
+    // fn get_buffer_start_point(&self) -> &usize {
+    //     &self.ifd_buffer_start_point
+    // }
+}
+
+pub fn decode_threaded<F>(width: usize, height: usize, dummy: bool, closure: &F) -> Vec<u16>
+where
+    F: Fn(&mut [u16], usize) + Sync,
+{
+    let mut out: Vec<u16> = alloc_image!(width, height, dummy);
+    out.rchunks_mut(width).enumerate().for_each(|(row, line)| {
+        closure(line, row);
+    });
+    out
+}
+
+pub fn decode_14le_unpacked(buf: &[u8], width: usize, height: usize, dummy: bool) -> Vec<u16> {
+    decode_threaded(
+        width,
+        height,
+        dummy,
+        &(|out: &mut [u16], row| {
+            let inb = &buf[(row * width * 2)..];
+
+            for (i, bytes) in (0..width).zip(inb.chunks_exact(2)) {
+                out[i] = LEu16(bytes, 0) & 0x3fff;
+            }
+        }),
+    )
+}
+
+#[allow(non_snake_case)]
+#[inline]
+pub fn LEu16(buf: &[u8], pos: usize) -> u16 {
+    LittleEndian::read_u16(&buf[pos..pos + 2])
+}
+
+fn decode_compressed(
+    &self,
+    src: &[u8],
+    width: usize,
+    height: usize,
+    bps: usize,
+    dummy: bool,
+) -> Result<Vec<u16>, String> {
+    // let metaifd = fetch_ifd!(self.tiff, Tag::NefMeta1);
+    // let meta = if let Some(meta) = metaifd.find_entry(Tag::NefMeta2) {
+    //     meta
+    // } else {
+    //     fetch_tag!(metaifd, Tag::NefMeta1)
+    // };
+    let offset_data_0x8c = [
+        73, 48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let offset_data_0x96 = [
+        70, 48, 0, 8, 0, 8, 0, 8, 0, 8, 34, 0, 183, 42, 170, 157, 224, 114, 94, 145, 24, 245, 28,
+        153, 101, 130, 240, 175, 191, 32, 210, 210, 47, 198, 193, 2, 167, 134, 197, 90, 33, 88,
+        216, 166, 202, 54,
+    ];
+
+    do_decode(
+        src,
+        offset_data_0x96,
+        metaifd.get_endian(),
+        width,
+        height,
+        bps,
+        dummy,
+    )
+}
+
+pub(crate) fn do_decode(
+    src: &[u8],
+    meta: &[u8],
+    endian: Endian,
+    width: usize,
+    height: usize,
+    bps: usize,
+    dummy: bool,
+) -> Result<Vec<u16>, String> {
+    let mut out = alloc_image_ok!(width, height, dummy);
+    let mut stream = ByteStream::new(meta, endian);
+    let v0 = stream.get_u8();
+    let v1 = stream.get_u8();
+    //println!("Nef version v0:{}, v1:{}", v0, v1);
+
+    let mut huff_select = 0;
+    if v0 == 73 || v1 == 88 {
+        stream.consume_bytes(2110);
+    }
+    if v0 == 70 {
+        huff_select = 2;
+    }
+    if bps == 14 {
+        huff_select += 3;
+    }
+
+    // Create the huffman table used to decode
+    let mut htable = Self::create_hufftable(huff_select)?;
+
+    // Setup the predictors
+    let mut pred_up1: [i32; 2] = [stream.get_u16() as i32, stream.get_u16() as i32];
+    let mut pred_up2: [i32; 2] = [stream.get_u16() as i32, stream.get_u16() as i32];
+
+    // Get the linearization curve
+    let mut points = [0 as u16; 1 << 16];
+    for i in 0..points.len() {
+        points[i] = i as u16;
+    }
+    let mut max = 1 << bps;
+    let csize = stream.get_u16() as usize;
+    let mut split = 0 as usize;
+    let step = if csize > 1 { max / (csize - 1) } else { 0 };
+    if v0 == 68 && v1 == 32 && step > 0 {
+        for i in 0..csize {
+            points[i * step] = stream.get_u16();
+        }
+        for i in 0..max {
+            points[i] = ((points[i - i % step] as usize * (step - i % step)
+                + points[i - i % step + step] as usize * (i % step))
+                / step) as u16;
+        }
+        split = endian.ru16(meta, 562) as usize;
+    } else if v0 != 70 && csize <= 0x4001 {
+        for i in 0..csize {
+            points[i] = stream.get_u16();
+        }
+        max = csize;
+    }
+    let curve = LookupTable::new(&points[0..max]);
+
+    let mut pump = BitPumpMSB::new(src);
+    let mut random = pump.peek_bits(24);
+
+    let bps: u32 = bps as u32;
+    for row in 0..height {
+        if split > 0 && row == split {
+            htable = Self::create_hufftable(huff_select + 1)?;
+        }
+        pred_up1[row & 1] += htable.huff_decode(&mut pump)?;
+        pred_up2[row & 1] += htable.huff_decode(&mut pump)?;
+        let mut pred_left1 = pred_up1[row & 1];
+        let mut pred_left2 = pred_up2[row & 1];
+        for col in (0..width).step_by(2) {
+            if col > 0 {
+                pred_left1 += htable.huff_decode(&mut pump)?;
+                pred_left2 += htable.huff_decode(&mut pump)?;
+            }
+            out[row * width + col + 0] = curve.dither(clampbits(pred_left1, bps), &mut random);
+            out[row * width + col + 1] = curve.dither(clampbits(pred_left2, bps), &mut random);
+        }
+    }
+
+    Ok(out)
 }
