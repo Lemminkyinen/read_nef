@@ -18,7 +18,7 @@ fn main() {
         Err(e) => eprintln!("Error: {:?}", e),
     }
 
-    let testi_data = "Jerellllllllllllllllllä on pittttttttttttttttttttttttttkäääääääääääääääää nulllllllllllllllllllllllllllllllllli".as_bytes();
+    let testi_data = "huffman decode testi".as_bytes();
     println!("Testi_data_pituus: {:?}", testi_data.len() * 8);
     let encoded_data = huffman::encode(testi_data);
     println!(
