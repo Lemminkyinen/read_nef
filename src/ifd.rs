@@ -1,7 +1,11 @@
+use std::sync::Arc;
+
 use crate::utils::bytes_to_num;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ifd {
+    pub name: Option<Arc<str>>,
+    pub offset_location: usize,
     pub entries: Vec<IfdEntry>,
 }
 
@@ -308,16 +312,18 @@ impl IfdEntryType {
 }
 
 impl Ifd {
-    pub fn parse_ifd(buffer: &[u8], offset: usize) -> Vec<Self> {
+    pub fn parse_ifd(buffer: Arc<[u8]>, offset: usize) -> Vec<Self> {
         let mut ifds = Vec::new();
         let mut internal_offset;
         let mut nikon_mapping = false;
         let ifd_buffer = &buffer[offset..];
+        let mut offset_location = offset;
 
+        let nikon_bytes = [0x4E, 0x69, 0x6B, 0x6F, 0x6E];
         let nikon_patterns = vec![
-            [0x4E, 0x69, 0x6B, 0x6F, 0x6E, 0x00, 0x02, 0x00, 0x00, 0x00],
-            [0x4E, 0x69, 0x6B, 0x6F, 0x6E, 0x00, 0x02, 0x10, 0x00, 0x00],
-            [0x4E, 0x69, 0x6B, 0x6F, 0x6E, 0x00, 0x02, 0x11, 0x00, 0x00],
+            [nikon_bytes, [0x00, 0x02, 0x00, 0x00, 0x00]].concat(),
+            [nikon_bytes, [0x00, 0x02, 0x10, 0x00, 0x00]].concat(),
+            [nikon_bytes, [0x00, 0x02, 0x11, 0x00, 0x00]].concat(),
         ];
 
         // println!("{:?}", &buffer[0..10]);
@@ -329,6 +335,7 @@ impl Ifd {
         {
             internal_offset = 10 + 8; // 10 nikon header bytes + 8 tiff header bytes
             nikon_mapping = true;
+            offset_location += 10;
             // println!("Nikon mapping");
         } else {
             internal_offset = 0; // ifd starts right away
@@ -339,6 +346,8 @@ impl Ifd {
 
         let ifd_entries = Vec::with_capacity(num_entries);
         let mut ifd = Ifd {
+            name: None::<Arc<str>>,
+            offset_location,
             entries: ifd_entries,
         };
 
@@ -364,19 +373,19 @@ impl Ifd {
             Self::try_fetch_ifds(
                 &ifd,
                 TagParam::IfdEntry(IfdEntryTag::SubIFDS),
-                &buffer,
+                buffer.clone(),
                 &mut ifds,
             );
             Self::try_fetch_ifds(
                 &ifd,
                 TagParam::IfdEntry(IfdEntryTag::ExifIFDPointer),
-                &buffer,
+                buffer.clone(),
                 &mut ifds,
             );
             Self::try_fetch_ifds(
                 &ifd,
                 TagParam::IfdEntry(IfdEntryTag::MakerNote),
-                &buffer,
+                buffer.clone(),
                 &mut ifds,
             );
 
@@ -398,7 +407,7 @@ impl Ifd {
         ifds
     }
 
-    fn try_fetch_ifds(ifd: &Ifd, tag: TagParam, buffer: &[u8], ifds: &mut Vec<Ifd>) {
+    fn try_fetch_ifds(ifd: &Ifd, tag: TagParam, buffer: Arc<[u8]>, ifds: &mut Vec<Ifd>) {
         let mut ifd_offsets: Vec<usize> = Vec::new();
         match tag {
             TagParam::IfdEntry(ifd_tag) => {
@@ -422,14 +431,20 @@ impl Ifd {
             }
         }
         for ifd_offset in ifd_offsets {
-            let mut sub_ifds = Self::parse_ifd(&buffer, ifd_offset);
+            let mut sub_ifds = Self::parse_ifd(buffer.clone(), ifd_offset);
             ifds.append(&mut sub_ifds);
-            println!("Successfully fetched {:?} IFD", tag);
+            println!("Successfully fetched {:?} IFD at {}", tag, ifd_offset);
         }
     }
 
-    fn get_entry(&self, ifd_name: IfdEntryTag) -> Option<&IfdEntry> {
+    pub fn get_entry(&self, ifd_name: IfdEntryTag) -> Option<&IfdEntry> {
         self.entries.iter().find(|entry| entry.tag == ifd_name)
+    }
+
+    pub fn get_entry_by_byte(&self, ifd_name: u16) -> Option<&IfdEntry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.tag.u16_value() == ifd_name)
     }
 
     pub fn print_info(&self) {
@@ -454,8 +469,8 @@ impl Ifd {
             );
             println!("Offset: {}.", entry.offset);
         }
+        println!("Start of IFD: {:?}", &self.offset_location);
         println!("-------------------------");
-        // println!("Start of IFD: {:?}", &self.start);
         // println!("End of IFD: {:?}", &self.end);
         for ifd_entry in &self.entries {
             print_ifd_entry(ifd_entry);
@@ -466,6 +481,22 @@ impl Ifd {
         //     println!("Offset to next IFD: {:?}", &self.offset_to_next_ifd)
         // }
         println!("-------------------------");
+    }
+
+    pub fn get_encoded_data(&self, buffer: Arc<[u8]>) -> Option<Arc<[u8]>> {
+        if let (Some(strip_offsets), Some(strip_byte_counts)) = (
+            self.get_entry(IfdEntryTag::StripOffsets),
+            self.get_entry(IfdEntryTag::StripByteCounts),
+        ) {
+            let encoded_data = buffer[strip_offsets.data_or_offset[0] as usize
+                ..strip_offsets.data_or_offset[0] as usize
+                    + strip_byte_counts.data_or_offset[0] as usize]
+                .to_vec();
+            Some(Arc::from(encoded_data))
+        } else {
+            println!("Image data not found");
+            None
+        }
     }
 }
 
@@ -497,36 +528,39 @@ impl IfdEntry {
                 IfdEntryType::AsciiString(_) => {
                     String::from_utf8_lossy(&self.data_or_offset).to_string()
                 }
-                _ => String::from("Not implemented yet")
-                // IfdType::UnsignedShort(_) => {
-                //     format_bytes_per_component_u16(&self.data_or_offset, num_components)
-                // }
-                // IfdType::UnsignedLong(_) => {
-                //     format_bytes_per_component_u32(&self.data_or_offset, num_components)
-                // }
-                // IfdType::UnsignedRational(_) => {
-                //     format_rational(&self.data_or_offset, num_components)
-                // }
-                // IfdType::SignedByte(_) => {
-                //     format_bytes_per_component_i8(&self.data_or_offset, num_components)
-                // }
-                // IfdType::Undefined(_) => {
-                //     format_bytes_per_component_u8(&self.data_or_offset, num_components)
-                // }
-                // IfdType::SignedShort(_) => {
-                //     format_bytes_per_component_i16(&self.data_or_offset, num_components)
-                // }
-                // IfdType::SignedLong(_) => {
-                //     format_bytes_per_component_i32(&self.data_or_offset, num_components)
-                // }
-                // IfdType::SignedRational(_) => format_rational(&self.data_or_offset, num_components),
-                // IfdType::SingleFloat(_) => format_float(&self.data_or_offset, num_components, 4),
-                // IfdType::DoubleFloat(_) => format_float(&self.data_or_offset, num_components, 8),
+                _ => String::from("Not implemented yet"), // IfdType::UnsignedShort(_) => {
+                                                          //     format_bytes_per_component_u16(&self.data_or_offset, num_components)
+                                                          // }
+                                                          // IfdType::UnsignedLong(_) => {
+                                                          //     format_bytes_per_component_u32(&self.data_or_offset, num_components)
+                                                          // }
+                                                          // IfdType::UnsignedRational(_) => {
+                                                          //     format_rational(&self.data_or_offset, num_components)
+                                                          // }
+                                                          // IfdType::SignedByte(_) => {
+                                                          //     format_bytes_per_component_i8(&self.data_or_offset, num_components)
+                                                          // }
+                                                          // IfdType::Undefined(_) => {
+                                                          //     format_bytes_per_component_u8(&self.data_or_offset, num_components)
+                                                          // }
+                                                          // IfdType::SignedShort(_) => {
+                                                          //     format_bytes_per_component_i16(&self.data_or_offset, num_components)
+                                                          // }
+                                                          // IfdType::SignedLong(_) => {
+                                                          //     format_bytes_per_component_i32(&self.data_or_offset, num_components)
+                                                          // }
+                                                          // IfdType::SignedRational(_) => format_rational(&self.data_or_offset, num_components),
+                                                          // IfdType::SingleFloat(_) => format_float(&self.data_or_offset, num_components, 4),
+                                                          // IfdType::DoubleFloat(_) => format_float(&self.data_or_offset, num_components, 8),
             }
         } else {
             // Value is stored at an offset in the file
             String::from_utf8_lossy(&self.data_or_offset).to_string()
         }
+    }
+
+    pub fn get_data_or_offset(&self) -> usize {
+        bytes_to_num(&self.data_or_offset)
     }
 
     pub fn get_offset_data<'a>(&self, buffer: &'a [u8]) -> &'a [u8] {
@@ -536,5 +570,9 @@ impl IfdEntry {
         } else {
             &[]
         }
+    }
+
+    pub fn get_raw_entry(&self) -> [u8; 12] {
+        self.raw_entry
     }
 }
