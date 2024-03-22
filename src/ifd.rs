@@ -312,7 +312,7 @@ impl IfdEntryType {
 }
 
 impl Ifd {
-    pub fn parse_ifd(buffer: Arc<[u8]>, offset: usize) -> Vec<Self> {
+    pub fn parse_ifd(buffer: &[u8], offset: usize) -> Vec<Self> {
         let mut ifds = Vec::new();
         let mut internal_offset;
         let mut nikon_mapping = false;
@@ -373,19 +373,19 @@ impl Ifd {
             Self::try_fetch_ifds(
                 &ifd,
                 TagParam::IfdEntry(IfdEntryTag::SubIFDS),
-                buffer.clone(),
+                buffer,
                 &mut ifds,
             );
             Self::try_fetch_ifds(
                 &ifd,
                 TagParam::IfdEntry(IfdEntryTag::ExifIFDPointer),
-                buffer.clone(),
+                buffer,
                 &mut ifds,
             );
             Self::try_fetch_ifds(
                 &ifd,
                 TagParam::IfdEntry(IfdEntryTag::MakerNote),
-                buffer.clone(),
+                buffer,
                 &mut ifds,
             );
 
@@ -407,7 +407,7 @@ impl Ifd {
         ifds
     }
 
-    fn try_fetch_ifds(ifd: &Ifd, tag: TagParam, buffer: Arc<[u8]>, ifds: &mut Vec<Ifd>) {
+    fn try_fetch_ifds(ifd: &Ifd, tag: TagParam, buffer: &[u8], ifds: &mut Vec<Ifd>) {
         let mut ifd_offsets: Vec<usize> = Vec::new();
         match tag {
             TagParam::IfdEntry(ifd_tag) => {

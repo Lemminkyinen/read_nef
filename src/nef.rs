@@ -1,9 +1,10 @@
-use byteorder::{ByteOrder, LittleEndian};
-use image::buffer;
-
+use crate::huffmanv2::{BitPump, HuffTable};
 use crate::ifd::Ifd;
+use crate::utils::{read_beu32, read_leu16};
+use byteorder::{ByteOrder, LittleEndian};
+use std::hash::Hash;
+use std::hash::{DefaultHasher, Hasher};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::{fs::File, io::Read, path::Path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,7 +14,7 @@ pub struct NefFile {
     pub meta_data: ImageMetadata,
     pub image_data: ImageData,
     pub ifds: Vec<Ifd>,
-    buffer: Arc<[u8]>,
+    buffer: Vec<u8>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -72,7 +73,7 @@ impl NefFile {
             meta_data,
             image_data,
             ifds,
-            buffer: Arc::from(buffer),
+            buffer,
         };
 
         let mut ifds = nef_file.parse_ifds().expect("Error parsing ifds");
@@ -89,129 +90,14 @@ impl NefFile {
     }
 
     fn parse_ifds(&self) -> Result<Vec<Ifd>, Error> {
-        let parsed_ifds = Ifd::parse_ifd(self.buffer.clone(), 0);
+        let parsed_ifds = Ifd::parse_ifd(self.buffer.as_slice(), 0);
         Ok(parsed_ifds)
     }
     // fn parse_metadata(&mut self) -> Result<(), Error> {
     //     // Extract metadata from the file.
     // }
 
-    fn nikon_read_curve(buffer: Arc<[u8]>, meta_offset: usize, tiff_bps: usize) -> Vec<usize> {
-        let ver0: u8;
-        let ver1: u8;
-        let mut vpred: [[u16; 2]; 2] = [[0; 2]; 2];
-        let csize: usize;
-        let mut step: usize;
-        let mut max: usize;
-
-        let mut pointer = meta_offset as usize;
-        (ver0, ver1) = (buffer[pointer], buffer[pointer + 1]);
-        if ver0 == 0x49 || ver1 == 0x58 {
-            pointer += 2112;
-        }
-
-        // read_shorts
-        let vpred_bytes = &buffer[pointer..pointer + 8];
-        for i in 0..2 {
-            for j in 0..2 {
-                vpred[i][j] = LittleEndian::read_u16(&vpred_bytes[(i * 2 + j) * 2..]);
-            }
-        }
-        pointer += 8;
-
-        // Calculate the step size for the curve if the curve size is greater than 1
-        step = (1 << tiff_bps) & 0x7fff as usize;
-        max = step;
-
-        // Calculate the step size for the curve if the curve size is greater than 1
-        csize = LittleEndian::read_u16(&buffer[pointer..pointer + 2]) as usize;
-        pointer += 2;
-        if csize > 1 {
-            step = max / (csize as usize - 1);
-        }
-
-        let mut curve = vec![0; max];
-        if ver0 == 0x44 && (ver1 == 0x20 || (ver1 == 0x40 && step > 3)) && step > 0 {
-            if ver1 == 0x40 {
-                step /= 4;
-                max /= 4;
-            }
-            for i in 0..csize as usize {
-                curve[i * step] = LittleEndian::read_u16(&buffer[pointer..pointer + 2]) as usize;
-            }
-            for i in 0..max {
-                curve[i] = (curve[i - i % step] * (step - i % step)
-                    + curve[i - i % step + step] * (i % step))
-                    / step;
-            }
-        } else if ver0 != 0x46 && csize <= 0x4001 {
-            let max = csize as usize;
-            for i in 0..max {
-                curve[i] = LittleEndian::read_u16(&buffer[pointer..pointer + 2]) as usize;
-                pointer += 2;
-            }
-        }
-        curve
-    }
-
-    fn make_decoder(source: &[u8]) -> Vec<u16> {
-        let mut max = 0;
-        let mut h = 0;
-        println!("Source: {:?}", source);
-        let count = &source[0..17];
-        for m in (0..=16).rev() {
-            if count[m] != 0 {
-                max = m;
-                break;
-            }
-        }
-
-        let mut huff = vec![0; 1 + (1 << max)];
-        huff[0] = max as u16;
-
-        let mut source_index = 16;
-        for len in 1..=max {
-            for _ in 0..count[len] {
-                for _ in 0..(1 << (max - len)) {
-                    if h <= (1 << max) {
-                        huff[h] = ((len as u16) << 8) | source[source_index] as u16;
-                        h += 1;
-                    }
-                }
-                source_index += 1;
-            }
-        }
-        huff
-    }
-
-    pub fn parse_raw_image_data(&self) -> Result<Vec<Vec<usize>>, Error> {
-        static NIKON_TREE: [[u8; 32]; 6] = [
-            [
-                0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, // 12-bit lossy
-                5, 4, 3, 6, 2, 7, 1, 0, 8, 9, 11, 10, 12, 0, 0, 0,
-            ],
-            [
-                0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, // 12-bit lossy after split
-                0x39, 0x5a, 0x38, 0x27, 0x16, 5, 4, 3, 2, 1, 0, 11, 12, 12, 0, 0,
-            ],
-            [
-                0, 1, 4, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 12-bit lossless
-                5, 4, 6, 3, 7, 2, 8, 1, 9, 0, 10, 11, 12, 0, 0, 0,
-            ],
-            [
-                0, 1, 4, 3, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, // 14-bit lossy
-                5, 6, 4, 7, 8, 3, 9, 2, 1, 0, 10, 11, 12, 13, 14, 0,
-            ],
-            [
-                0, 1, 5, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, // 14-bit lossy after split
-                8, 0x5c, 0x4b, 0x3a, 0x29, 7, 6, 5, 4, 3, 2, 1, 0, 13, 14, 0,
-            ],
-            [
-                0, 1, 4, 2, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, // 14-bit lossless
-                7, 6, 8, 5, 9, 4, 10, 3, 11, 12, 2, 0, 1, 13, 14, 0,
-            ],
-        ];
-
+    pub fn parse_raw_image_data(&self) -> Result<Vec<u16>, Error> {
         // Clone the third IFD (Image File Directory) which contains the raw image data
         let data_ifd = self.ifds[2].clone();
 
@@ -225,13 +111,24 @@ impl NefFile {
             .unwrap()
             .get_data_or_offset();
 
-        let mut hpred = vec![0; width];
+        let stripoffsets = data_ifd
+            .get_entry(crate::ifd::IfdEntryTag::StripOffsets)
+            .unwrap()
+            .get_data_or_offset();
 
-        // Initialize vertical predictor array
-        let mut vpred: [[u16; 2]; 2] = [[0; 2]; 2];
+        let stripbytecounts = data_ifd
+            .get_entry(crate::ifd::IfdEntryTag::StripByteCounts)
+            .unwrap()
+            .get_data_or_offset();
+
+        let src = &self.buffer[stripoffsets..stripoffsets + stripbytecounts];
+        println!(
+            "StripOffsets: {} StripByteCounts: {}",
+            stripoffsets, stripbytecounts
+        );
 
         // Initialize split value
-        let mut split = 0;
+        let split = 0;
 
         // Clone the last IFD which contains the MakerNote
         let makernote_ifd = self.ifds.last().unwrap().clone();
@@ -248,113 +145,100 @@ impl NefFile {
         let tiff_bps = data_ifd
             .get_entry(crate::ifd::IfdEntryTag::BitsPerSample)
             .unwrap()
-            .get_data_or_offset();
+            .get_data_or_offset() as u16;
 
         // Calculate the total pointer for the 0x96 tag data
         let mut pointer = pointer_0x96 + makernote_ifd.offset_location;
-        println!("Pointer total 0x96: {}\n", pointer);
 
-        // Save the meta offset
-        let meta_offset = pointer;
+        println!("Pointer total 0x96: {}\n", pointer);
 
         // Get the version bytes
         let (ver0, ver1) = (self.buffer[pointer], self.buffer[pointer + 1]);
         println!("Version: {:#02X} {:#02X}", ver0, ver1);
-
-        // Move the pointer past the version bytes
         pointer += 2;
 
         // Determine the Huffman compression type based on the version bytes and BitsPerSample
-        let mut huff_tree = if ver0 == 0x46 { 2 } else { 0 };
+        let mut huff_select = if ver0 == 0x46 { 2 } else { 0 };
         if tiff_bps == 14 {
-            huff_tree += 3;
+            huff_select += 3;
         }
 
+        // Create the Huffman table
+        let mut huff_table = create_hufftable(huff_select).expect("Error creating huffman table");
+
         // Read the vertical predictor values
+        let mut vpred: [[u16; 2]; 2] = [[0; 2]; 2];
         let vpred_bytes = &self.buffer[pointer..pointer + 8];
         for i in 0..2 {
             for j in 0..2 {
                 vpred[i][j] = LittleEndian::read_u16(&vpred_bytes[(i * 2 + j) * 2..]);
             }
         }
+        let mut pred_up1 = [vpred[0][0] as i32, vpred[0][1] as i32];
+        let mut pred_up2 = [vpred[1][0] as i32, vpred[1][1] as i32];
+        println!("Predictors: {:?} {:?}", pred_up1, pred_up2);
+
         pointer += 8;
 
-        // Calculate the maximum value that can be represented with the given BitsPerSample
-        let mut max = (1 << tiff_bps) & 0x7fff;
+        // Get curve
+        let curve = nikon_read_curve(self.buffer.as_slice(), &mut pointer, tiff_bps, ver0, ver1);
+        let mut hasher = DefaultHasher::new();
+        curve.table.hash(&mut hasher);
+        println!("Curve hash: {:?}", hasher.finish());
 
-        // Read the curve size
-        let csize = LittleEndian::read_u16(&self.buffer[pointer..pointer + 2]);
-        pointer += 2;
+        println!("src len: {}", src.len());
+        println!(
+            "src ten first and last: {:?} {:?}",
+            &src[0..10],
+            &src[src.len() - 10..]
+        );
 
-        // If the version bytes match certain values, adjust the max value and read the split value
-        if ver0 == 0x44 && (ver1 == 0x20 || ver1 == 0x40) {
-            if ver1 == 0x40 {
-                max /= 4;
-            }
-            pointer = meta_offset + 562;
-            split = LittleEndian::read_u16(&self.buffer[pointer..pointer + 2]) as usize;
-            pointer += 2;
-        }
-
-        // get curve
-        let curve = Self::nikon_read_curve(self.buffer.clone(), meta_offset, tiff_bps);
+        let mut pump = BitPumpMSB::new(src);
+        let mut random = pump.peek_bits(24);
 
         // Reduce the max value by checking the curve array from the end
         // If the last two elements of the curve array are equal, decrease max by 1
         // This process continues until the last two elements are not equal or max is less than or equal to 2
-        while max > 2 && curve[max - 2] == curve[max - 1] {
-            max -= 1;
+        let mut out = vec![0; width * height];
+        println!("out.len: {}", out.len());
+        let bps: u32 = tiff_bps as u32;
+        println!("random: {:?}", random);
+        for row in 0..height {
+            // println!("Row: {}", row);
+            if split > 0 && row == split {
+                // This should not happen
+                // huff_table =
+                //     create_hufftable(huff_select + 1).expect("Error creating huffman table");
+            }
+            pred_up1[row & 1] += huff_table
+                .huff_decode(&mut pump)
+                .expect("Error decoding huffman");
+            // println!("pred_up1: {}", pred_up1[row & 1]);
+            pred_up2[row & 1] += huff_table
+                .huff_decode(&mut pump)
+                .expect("Error decoding huffman");
+            // println!("pred_up2: {}", pred_up2[row & 1]);
+            let mut pred_left1 = pred_up1[row & 1];
+            // println!("pred_left1: {}", pred_left1);
+            let mut pred_left2 = pred_up2[row & 1];
+            // println!("pred_left2: {}", pred_left2);
+            for col in (0..width).step_by(2) {
+                if col > 0 {
+                    pred_left1 += huff_table
+                        .huff_decode(&mut pump)
+                        .expect("Error decoding huffman");
+                    // println!("pred_left1: {}", pred_left1);
+                    pred_left2 += huff_table
+                        .huff_decode(&mut pump)
+                        .expect("Error decoding huffman");
+                    // println!("pred_left2: {}", pred_left2);
+                }
+                out[row * width + col + 0] = curve.dither(clampbits(pred_left1, bps), &mut random);
+                out[row * width + col + 1] = curve.dither(clampbits(pred_left2, bps), &mut random);
+            }
         }
 
-        let mut huff_decoder = Self::make_decoder(NIKON_TREE[huff_tree as usize].as_ref());
-        let mut raw_data = vec![vec![0; width]; height];
-        let mut bit_state = BitState::new();
-        let mut row = 0;
-        let mut min = 0;
-        let encoded_data = data_ifd
-            .get_encoded_data(self.buffer.clone())
-            .expect("Error getting encoded data");
-        while row < height {
-            if split != 0 && row == split {
-                huff_decoder = Self::make_decoder(NIKON_TREE[(huff_tree + 1) as usize].as_ref());
-                min = 16;
-                max += min << 1;
-            }
-            for col in 0..width {
-                let i = getbithuff(&mut bit_state, 0, Some(&huff_decoder), encoded_data.clone())
-                    .unwrap();
-                let len = (i & 15) as usize;
-                let shl = (i >> 4) as usize;
-                let mut diff = ((getbithuff(
-                    &mut bit_state,
-                    (len - shl) as i32,
-                    None,
-                    encoded_data.clone(),
-                )
-                .unwrap()
-                    << 1)
-                    + 1)
-                    << shl
-                    >> 1;
-                if len > 0 && (diff & (1 << (len - 1))) == 0 {
-                    diff -= (1 << len) - !shl;
-                }
-                if col < 2 {
-                    vpred[row & 1][col] += diff as u16;
-                    hpred[col] = vpred[row & 1][col];
-                } else {
-                    hpred[col & 1] += diff as u16;
-                }
-                if (hpred[col & 1] as usize + min) >= max {
-                    return Err(Error::ParseError(
-                        "Error parsing raw image data".to_string(),
-                    ));
-                }
-                raw_data[row][col] = curve[lim(hpred[col & 1] as i16, 0, 0x3fff) as usize];
-            }
-            row += 1;
-        }
-        Ok(raw_data)
+        Ok(out)
     }
 
     // fn parse_image_thumbnail(&mut self) -> Result<(), Error> {
@@ -362,68 +246,179 @@ impl NefFile {
     // }
 }
 
-fn lim(value: i16, lower: i16, upper: i16) -> i16 {
-    std::cmp::min(std::cmp::max(value, lower), upper)
-}
-pub struct BitState {
-    bitbuf: u32,
-    vbits: i32,
-    reset: i32,
-    pos: usize,
+const NIKON_TREE: [[[u8; 16]; 3]; 6] = [
+    [
+        // 12-bit lossy
+        [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
+        [5, 4, 3, 6, 2, 7, 1, 0, 8, 9, 11, 10, 12, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+    [
+        // 12-bit lossy after split
+        [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
+        [6, 5, 5, 5, 5, 5, 4, 3, 2, 1, 0, 11, 12, 12, 0, 0],
+        [3, 5, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+    [
+        // 12-bit lossless
+        [0, 0, 1, 4, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+        [5, 4, 6, 3, 7, 2, 8, 1, 9, 0, 10, 11, 12, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+    [
+        // 14-bit lossy
+        [0, 0, 1, 4, 3, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
+        [5, 6, 4, 7, 8, 3, 9, 2, 1, 0, 10, 11, 12, 13, 14, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+    [
+        // 14-bit lossy after split
+        [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0],
+        [8, 7, 7, 7, 7, 7, 6, 5, 4, 3, 2, 1, 0, 13, 14, 0],
+        [0, 5, 4, 3, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+    [
+        // 14-bit lossless
+        [0, 0, 1, 4, 2, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0],
+        [7, 6, 8, 5, 9, 4, 10, 3, 11, 12, 2, 0, 1, 13, 14, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+];
+
+fn create_hufftable(num: usize) -> Result<HuffTable, String> {
+    let mut htable = HuffTable::empty();
+
+    for i in 0..15 {
+        htable.bits[i] = NIKON_TREE[num][0][i] as u32;
+        htable.huffval[i] = NIKON_TREE[num][1][i] as u32;
+        htable.shiftval[i] = NIKON_TREE[num][2][i] as u32;
+    }
+
+    htable.initialize()?;
+    println!("Hufftable: {:?}", htable);
+    Ok(htable)
 }
 
-impl BitState {
-    pub fn new() -> Self {
-        BitState {
-            bitbuf: 0,
-            vbits: 0,
-            reset: 0,
-            pos: 0,
+fn nikon_read_curve(
+    buffer: &[u8],
+    pointer: &mut usize,
+    tiff_bps: u16,
+    ver0: u8,
+    ver1: u8,
+) -> LookupTable {
+    let mut points = [0 as u16; 1 << 16];
+    for i in 0..points.len() {
+        points[i] = i as u16;
+    }
+    let mut max = 1 << tiff_bps;
+    let csize = read_leu16(buffer, pointer, false) as usize;
+    // let mut split = 0 as usize;
+    let step = if csize > 1 { max / (csize - 1) } else { 0 };
+    if ver0 == 0x44 && ver1 == 0x20 && step > 0 {
+        // should not happen
+        // for i in 0..csize {
+        //     points[i * step] = read_u16(buffer.clone(), pointer);
+        // }
+        // for i in 0..max {
+        //     points[i] = ((points[i - i % step] as usize * (step - i % step)
+        //         + points[i - i % step + step] as usize * (i % step))
+        //         / step) as u16;
+        // }
+        // split = endian.ru16(meta, 562) as usize;
+        println!("Should not happen")
+    } else if ver0 != 0x46 && csize <= 0x4001 {
+        for i in 0..csize {
+            points[i] = read_leu16(buffer.clone(), pointer, false);
         }
+        max = csize;
     }
+    LookupTable::new(&points[0..max])
 }
 
-pub fn getbithuff(
-    state: &mut BitState,
-    nbits: i32,
-    huff: Option<&[u16]>,
-    buffer: Arc<[u8]>,
-) -> Result<usize, &'static str> {
-    let mut c: u32;
-
-    if nbits > 25 {
-        return Ok(0);
-    }
-    if nbits < 0 {
-        state.bitbuf = 0;
-        state.vbits = 0;
-        state.reset = 0;
-        return Ok(0);
-    }
-    if nbits == 0 || state.vbits < 0 {
-        return Ok(0);
-    }
-    while state.reset == 0 && state.vbits < nbits {
-        if state.pos < buffer.len() {
-            c = buffer[state.pos] as u32;
-            state.pos += 1;
-        } else {
-            break;
-        }
-    }
-    c = if state.vbits == 0 {
+pub fn clampbits(val: i32, bits: u32) -> u16 {
+    let max = (1 << bits) - 1;
+    if val < 0 {
         0
+    } else if val > max {
+        max as u16
     } else {
-        state.bitbuf << (32 - state.vbits) >> (32 - nbits)
-    };
-    if let Some(huff) = huff {
-        state.vbits -= (huff[c as usize] >> 8) as i32;
-        c = huff[c as usize] as u32;
-    } else {
-        state.vbits -= nbits;
+        val as u16
     }
-    if state.vbits < 0 {
-        return Err("Error in getbithuff");
+}
+#[derive(Debug, Clone)]
+pub struct LookupTable {
+    pub table: Vec<(u16, u16, u16)>,
+}
+
+impl LookupTable {
+    pub fn new(table: &[u16]) -> LookupTable {
+        let mut tbl = vec![(0, 0, 0); table.len()];
+        for i in 0..table.len() {
+            let center = table[i];
+            let lower = if i > 0 { table[i - 1] } else { center };
+            let upper = if i < (table.len() - 1) {
+                table[i + 1]
+            } else {
+                center
+            };
+            let base = if center == 0 {
+                0
+            } else {
+                center - ((upper - lower + 2) / 4)
+            };
+            let delta = upper - lower;
+            tbl[i] = (center, base, delta);
+        }
+        LookupTable { table: tbl }
     }
-    Ok(c as usize)
+
+    //  pub fn lookup(&self, value: u16) -> u16 {
+    //    let (val, _, _) = self.table[value as usize];
+    //    val
+    //  }
+
+    pub fn dither(&self, value: u16, rand: &mut u32) -> u16 {
+        let (_, sbase, sdelta) = self.table[value as usize];
+        let base = sbase as u32;
+        let delta = sdelta as u32;
+        let pixel = base + ((delta * (*rand & 2047) + 1024) >> 12);
+        *rand = 15700 * (*rand & 65535) + (*rand >> 16);
+        pixel as u16
+    }
+}
+
+pub struct BitPumpMSB<'a> {
+    buffer: &'a [u8],
+    pos: usize,
+    bits: u64,
+    nbits: u32,
+}
+
+impl<'a> BitPumpMSB<'a> {
+    pub fn new(src: &'a [u8]) -> BitPumpMSB {
+        BitPumpMSB {
+            buffer: src,
+            pos: 0,
+            bits: 0,
+            nbits: 0,
+        }
+    }
+}
+
+impl<'a> BitPump for BitPumpMSB<'a> {
+    #[inline(always)]
+    fn peek_bits(&mut self, num: u32) -> u32 {
+        if num > self.nbits {
+            let inbits: u64 = read_beu32(self.buffer.into(), &mut self.pos, true) as u64;
+            self.bits = (self.bits << 32) | inbits;
+            self.pos += 4;
+            self.nbits += 32;
+        }
+        (self.bits >> (self.nbits - num)) as u32
+    }
+
+    fn consume_bits(&mut self, num: u32) {
+        self.nbits -= num;
+        self.bits &= (1 << self.nbits) - 1;
+    }
 }
