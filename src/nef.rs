@@ -7,6 +7,45 @@ use std::hash::{DefaultHasher, Hasher};
 use std::path::PathBuf;
 use std::{fs::File, io::Read, path::Path};
 
+const NIKON_TREE: [[[u8; 16]; 3]; 6] = [
+    [
+        // 12-bit lossy
+        [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
+        [5, 4, 3, 6, 2, 7, 1, 0, 8, 9, 11, 10, 12, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+    [
+        // 12-bit lossy after split
+        [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
+        [6, 5, 5, 5, 5, 5, 4, 3, 2, 1, 0, 11, 12, 12, 0, 0],
+        [3, 5, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+    [
+        // 12-bit lossless
+        [0, 0, 1, 4, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+        [5, 4, 6, 3, 7, 2, 8, 1, 9, 0, 10, 11, 12, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+    [
+        // 14-bit lossy
+        [0, 0, 1, 4, 3, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
+        [5, 6, 4, 7, 8, 3, 9, 2, 1, 0, 10, 11, 12, 13, 14, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+    [
+        // 14-bit lossy after split
+        [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0],
+        [8, 7, 7, 7, 7, 7, 6, 5, 4, 3, 2, 1, 0, 13, 14, 0],
+        [0, 5, 4, 3, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+    [
+        // 14-bit lossless
+        [0, 0, 1, 4, 2, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0],
+        [7, 6, 8, 5, 9, 4, 10, 3, 11, 12, 2, 0, 1, 13, 14, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NefFile {
     pub file_name: String,
@@ -30,7 +69,7 @@ pub struct ImageMetadata {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ImageData {
     pub height: usize,
-    // pub width: usize,
+    pub width: usize,
     // pub data_offset: u64,
     // pub tiff_bps: u16,
     // pub raw_image: Vec<u16>,
@@ -50,20 +89,16 @@ impl NefFile {
     pub fn open(file_path: &Path) -> Result<NefFile, Error> {
         let mut file = File::open(file_path).expect("Error loading file");
         let file_path = Self::get_absolute_path(file_path).expect("Error getting full path");
-        let file_name = file_path
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned()
-            .into();
+        let file_name = file_path.file_name().unwrap().to_str().unwrap().to_owned();
 
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).expect("Error reading file");
 
         let meta_data = ImageMetadata { image_size: 0 };
-
-        let image_data = ImageData { height: 0 };
+        let image_data = ImageData {
+            height: 0,
+            width: 0,
+        };
 
         let ifds: Vec<Ifd> = Vec::new();
 
@@ -80,13 +115,30 @@ impl NefFile {
 
         nef_file.ifds.append(&mut ifds);
 
+        nef_file.add_metadata().expect("Error adding metadata!");
+
         Ok(nef_file)
+    }
+
+    fn add_metadata(&mut self) -> Result<(), Error> {
+        let data_ifd = self.ifds[2].clone();
+        let width = data_ifd
+            .get_entry(crate::ifd::IfdEntryTag::ImageWidth)
+            .unwrap()
+            .get_data_or_offset();
+        let height = data_ifd
+            .get_entry(crate::ifd::IfdEntryTag::ImageLength)
+            .unwrap()
+            .get_data_or_offset();
+        self.image_data.height = height;
+        self.image_data.width = width;
+        Ok(())
     }
 
     fn get_absolute_path(file_name: &Path) -> Option<PathBuf> {
         let current_dir = std::env::current_dir().ok()?;
         let file_path = current_dir.join(file_name);
-        Some(file_path.canonicalize().ok()?)
+        file_path.canonicalize().ok()
     }
 
     fn parse_ifds(&self) -> Result<Vec<Ifd>, Error> {
@@ -135,7 +187,7 @@ impl NefFile {
         println!("MakeNote IFD offset: {}", makernote_ifd.offset_location);
 
         // Get the entry for the 0x96 tag from the MakerNote IFD
-        let entry_0x96 = makernote_ifd.get_entry_by_byte(0x96).unwrap().clone();
+        let entry_0x96 = *makernote_ifd.get_entry_by_byte(0x96).unwrap();
 
         // Get the offset for the 0x96 tag data
         let pointer_0x96 = entry_0x96.get_data_or_offset();
@@ -164,7 +216,7 @@ impl NefFile {
         }
 
         // Create the Huffman table
-        let mut huff_table = create_hufftable(huff_select).expect("Error creating huffman table");
+        let huff_table = create_hufftable(huff_select).expect("Error creating huffman table");
 
         // Read the vertical predictor values
         let mut vpred: [[u16; 2]; 2] = [[0; 2]; 2];
@@ -233,7 +285,7 @@ impl NefFile {
                         .expect("Error decoding huffman");
                     // println!("pred_left2: {}", pred_left2);
                 }
-                out[row * width + col + 0] = curve.dither(clampbits(pred_left1, bps), &mut random);
+                out[row * width + col] = curve.dither(clampbits(pred_left1, bps), &mut random);
                 out[row * width + col + 1] = curve.dither(clampbits(pred_left2, bps), &mut random);
             }
         }
@@ -245,45 +297,6 @@ impl NefFile {
     //     // Extract image thumbnail data from the file.
     // }
 }
-
-const NIKON_TREE: [[[u8; 16]; 3]; 6] = [
-    [
-        // 12-bit lossy
-        [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
-        [5, 4, 3, 6, 2, 7, 1, 0, 8, 9, 11, 10, 12, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    ],
-    [
-        // 12-bit lossy after split
-        [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
-        [6, 5, 5, 5, 5, 5, 4, 3, 2, 1, 0, 11, 12, 12, 0, 0],
-        [3, 5, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    ],
-    [
-        // 12-bit lossless
-        [0, 0, 1, 4, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0],
-        [5, 4, 6, 3, 7, 2, 8, 1, 9, 0, 10, 11, 12, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    ],
-    [
-        // 14-bit lossy
-        [0, 0, 1, 4, 3, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
-        [5, 6, 4, 7, 8, 3, 9, 2, 1, 0, 10, 11, 12, 13, 14, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    ],
-    [
-        // 14-bit lossy after split
-        [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0],
-        [8, 7, 7, 7, 7, 7, 6, 5, 4, 3, 2, 1, 0, 13, 14, 0],
-        [0, 5, 4, 3, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    ],
-    [
-        // 14-bit lossless
-        [0, 0, 1, 4, 2, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0],
-        [7, 6, 8, 5, 9, 4, 10, 3, 11, 12, 2, 0, 1, 13, 14, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    ],
-];
 
 fn create_hufftable(num: usize) -> Result<HuffTable, String> {
     let mut htable = HuffTable::empty();
@@ -306,7 +319,7 @@ fn nikon_read_curve(
     ver0: u8,
     ver1: u8,
 ) -> LookupTable {
-    let mut points = [0 as u16; 1 << 16];
+    let mut points = [0_u16; 1 << 16];
     for i in 0..points.len() {
         points[i] = i as u16;
     }
@@ -328,7 +341,7 @@ fn nikon_read_curve(
         println!("Should not happen")
     } else if ver0 != 0x46 && csize <= 0x4001 {
         for i in 0..csize {
-            points[i] = read_leu16(buffer.clone(), pointer, false);
+            points[i] = read_leu16(buffer, pointer, false);
         }
         max = csize;
     }
@@ -409,7 +422,7 @@ impl<'a> BitPump for BitPumpMSB<'a> {
     #[inline(always)]
     fn peek_bits(&mut self, num: u32) -> u32 {
         if num > self.nbits {
-            let inbits: u64 = read_beu32(self.buffer.into(), &mut self.pos, true) as u64;
+            let inbits: u64 = read_beu32(self.buffer, &mut self.pos, true) as u64;
             self.bits = (self.bits << 32) | inbits;
             self.pos += 4;
             self.nbits += 32;
