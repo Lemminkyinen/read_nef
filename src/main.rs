@@ -1,4 +1,3 @@
-mod huffman;
 mod huffmanv2;
 mod ifd;
 mod nef;
