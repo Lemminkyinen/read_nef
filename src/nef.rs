@@ -78,15 +78,8 @@ pub struct ImageData {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ImageThumbnail {}
 
-#[derive(Debug)]
-pub enum Error {
-    IoError(std::io::Error),
-    ParseError(String),
-    // Add other error variants as needed.
-}
-
 impl NefFile {
-    pub fn open(file_path: &Path) -> Result<NefFile, Error> {
+    pub fn open(file_path: &Path) -> Result<NefFile, anyhow::Error> {
         let mut file = File::open(file_path).expect("Error loading file");
         let file_path = Self::get_absolute_path(file_path).expect("Error getting full path");
         let file_name = file_path.file_name().unwrap().to_str().unwrap().to_owned();
@@ -120,7 +113,7 @@ impl NefFile {
         Ok(nef_file)
     }
 
-    fn add_metadata(&mut self) -> Result<(), Error> {
+    fn add_metadata(&mut self) -> Result<(), anyhow::Error> {
         let data_ifd = self.ifds[2].clone();
         let width = data_ifd
             .get_entry(crate::ifd::IfdEntryTag::ImageWidth)
@@ -141,7 +134,7 @@ impl NefFile {
         file_path.canonicalize().ok()
     }
 
-    fn parse_ifds(&self) -> Result<Vec<Ifd>, Error> {
+    fn parse_ifds(&self) -> Result<Vec<Ifd>, anyhow::Error> {
         let parsed_ifds = Ifd::parse_ifd(self.buffer.as_slice(), 0);
         Ok(parsed_ifds)
     }
@@ -149,7 +142,7 @@ impl NefFile {
     //     // Extract metadata from the file.
     // }
 
-    pub fn parse_raw_image_data(&self) -> Result<Vec<u16>, Error> {
+    pub fn parse_raw_image_data(&self) -> Result<Vec<u16>, anyhow::Error> {
         // Clone the third IFD (Image File Directory) which contains the raw image data
         let data_ifd = self.ifds[2].clone();
 
@@ -296,6 +289,25 @@ impl NefFile {
     // fn parse_image_thumbnail(&mut self) -> Result<(), Error> {
     //     // Extract image thumbnail data from the file.
     // }
+
+    // Try to read the 2x2 CFA pattern bytes from the data IFD (CFAPattern, tag 0x828E)
+    // Returns the first four bytes in row-major order if available.
+    pub fn cfa_pattern_2x2(&self) -> Option<[u8; 4]> {
+        // Heuristic: third IFD (index 2) is the image data IFD in this project
+        let data_ifd = self.ifds.get(2)?;
+        if let Some(entry) = data_ifd.get_entry(crate::ifd::IfdEntryTag::CFAPattern) {
+            if entry.offset {
+                let bytes = entry.get_offset_data(&self.buffer);
+                if bytes.len() >= 4 {
+                    return Some([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                }
+            } else {
+                // Value may be stored inline in data_or_offset
+                return Some(entry.data_or_offset);
+            }
+        }
+        None
+    }
 }
 
 fn create_hufftable(num: usize) -> Result<HuffTable, String> {

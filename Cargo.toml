@@ -1,13 +1,12 @@
 [package]
 name = "read_nef"
 version = "0.1.0"
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+edition = "2024"
 
 [dependencies]
+anyhow = "1.0.100"
 byteorder = "1.5.0"
 flate2 = "1.0.30"
-image = "0.25.1"
+image = "0.25.8"
 imagepipe = "0.5.0"
 rawloader = "0.37"
